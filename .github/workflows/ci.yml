@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            label: macOS (Apple Silicon)
+          - runner: ubuntu-24.04
+            label: Linux (x86_64)
+
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Podman (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install podman
+          podman machine init --cpus 4 --memory 4096
+          podman machine start
+          podman info
+
+      - name: Verify Podman (Linux)
+        if: runner.os == 'Linux'
+        run: podman info
+
+      - name: Build container image
+        run: scripts/kbuild-container build
+
+      - name: Verify toolchain
+        run: |
+          scripts/kbuild-container gcc --version
+          scripts/kbuild-container make --version
+          scripts/kbuild-container x86_64-linux-gnu-gcc --version
+
+      - name: Clone kernel source (shallow)
+        run: |
+          git clone --depth=1 --branch v6.15 \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+            "$HOME/linux"
+
+      # arm64 native build (Apple Silicon runner)
+      - name: "arm64: tinyconfig + build"
+        if: runner.arch == 'ARM64'
+        run: |
+          KBUILD_SRCDIR="$HOME/linux" scripts/kbuild-container make tinyconfig
+          KBUILD_SRCDIR="$HOME/linux" scripts/kbuild-container make -j4
+
+      # x86_64 cross-compile from arm64
+      - name: "x86_64 cross: tinyconfig + build"
+        if: runner.arch == 'ARM64'
+        run: |
+          KBUILD_SRCDIR="$HOME/linux" scripts/kbuild-container make mrproper
+          KBUILD_SRCDIR="$HOME/linux" scripts/kbuild-container x86 tinyconfig
+          KBUILD_SRCDIR="$HOME/linux" scripts/kbuild-container x86 -j4
+
+      # x86_64 native build (Linux runner)
+      - name: "x86_64 native: tinyconfig + build"
+        if: runner.arch == 'X64'
+        run: |
+          KBUILD_SRCDIR="$HOME/linux" scripts/kbuild-container make \
+            ARCH=x86 tinyconfig
+          KBUILD_SRCDIR="$HOME/linux" scripts/kbuild-container make \
+            ARCH=x86 -j4
