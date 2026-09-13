@@ -1,0 +1,154 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+#
+# Convenience wrapper for building the Linux kernel inside a Podman container.
+# Designed for macOS (Apple Silicon) — builds arm64 natively, x86_64 via cross.
+#
+# Usage:
+#   scripts/kbuild-container shell                    # interactive shell
+#   scripts/kbuild-container make defconfig           # native arm64 build
+#   scripts/kbuild-container make ARCH=x86 defconfig  # cross-compile for x86_64
+#   scripts/kbuild-container x86 defconfig            # shorthand for x86_64 cross
+#
+# Environment variables:
+#   KBUILD_IMAGE    override the container image name (default: kernel-build)
+#   KBUILD_RUNTIME  force a runtime: podman or docker (default: auto-detect)
+#   KBUILD_CPUS     number of parallel jobs (default: nproc inside container)
+#   KBUILD_SRCDIR   override source directory to mount (default: auto-detect)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+
+# When running from a standalone repo (not inside the kernel tree),
+# default to the current working directory as the kernel source.
+if [ -f "$REPO_DIR/Kbuild" ] || [ -f "$REPO_DIR/Kconfig" ]; then
+    SRC_DIR="$REPO_DIR"
+else
+    SRC_DIR="$(pwd -P)"
+fi
+
+IMAGE="${KBUILD_IMAGE:-kernel-build}"
+RUNTIME="${KBUILD_RUNTIME:-}"
+CPUS="${KBUILD_CPUS:-}"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+find_runtime() {
+    if [ -n "$RUNTIME" ]; then
+        command -v "$RUNTIME" >/dev/null 2>&1 || die "runtime not found: $RUNTIME"
+        echo "$RUNTIME"
+        return
+    fi
+    for rt in podman docker; do
+        if command -v "$rt" >/dev/null 2>&1; then
+            echo "$rt"
+            return
+        fi
+    done
+    die "no container runtime found (install podman or docker)"
+}
+
+# On macOS with Podman, /Users is auto-mounted in the VM but external
+# volumes like /Volumes/* are not.  If the source tree lives on an
+# external volume but is reachable via a symlink under /Users, prefer
+# the symlink path so the bind-mount works inside the VM.
+resolve_src_dir() {
+    if [ -n "${KBUILD_SRCDIR:-}" ]; then
+        echo "$KBUILD_SRCDIR"
+        return
+    fi
+
+    echo "$SRC_DIR"
+}
+
+ensure_image() {
+    local rt="$1"
+    local ctx="$2"
+    if ! "$rt" image exists "$IMAGE" 2>/dev/null; then
+        echo "Building container image '$IMAGE'..."
+        "$rt" build -t "$IMAGE" "$ctx"
+    fi
+}
+
+run_container() {
+    local rt="$1"
+    local src="$2"
+    shift 2
+
+    local opts=(
+        run --rm
+        --volume "$src:/src"
+        --workdir /src
+    )
+
+    if [ "$rt" = "podman" ]; then
+        opts+=(--userns "keep-id:uid=$(id -u),gid=$(id -g)")
+    else
+        opts+=(--user "$(id -u):$(id -g)")
+    fi
+
+    "$rt" "${opts[@]}" "$IMAGE" "$@"
+}
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/kbuild-container <command>
+
+Commands:
+  shell                      Start an interactive shell in the build container
+  build                      Build image without running anything
+  make [ARGS...]             Run make with given arguments (native arm64)
+  x86 [make-targets...]      Cross-compile for x86_64
+  <any command>              Run an arbitrary command in the container
+
+Examples:
+  scripts/kbuild-container shell
+  scripts/kbuild-container make defconfig
+  scripts/kbuild-container make -j8 Image modules
+  scripts/kbuild-container x86 defconfig
+  scripts/kbuild-container x86 -j8 bzImage modules
+EOF
+    exit 0
+}
+
+[ $# -eq 0 ] && usage
+
+RT="$(find_runtime)"
+MOUNT_SRC="$(resolve_src_dir)"
+CMD="$1"
+shift
+
+case "$CMD" in
+    -h|--help|help)
+        usage
+        ;;
+    build)
+        echo "Building container image '$IMAGE'..."
+        "$RT" build -t "$IMAGE" "$REPO_DIR"
+        ;;
+    shell)
+        ensure_image "$RT" "$REPO_DIR"
+        "$RT" run --rm -it \
+            --volume "$MOUNT_SRC:/src" \
+            --workdir /src \
+            $( [ "$RT" = "podman" ] && echo "--userns keep-id:uid=$(id -u),gid=$(id -g)" || echo "--user $(id -u):$(id -g)" ) \
+            "$IMAGE" \
+            /bin/bash
+        ;;
+    x86)
+        ensure_image "$RT" "$REPO_DIR"
+        JOBS="${CPUS:+-j$CPUS}"
+        run_container "$RT" "$MOUNT_SRC" make ARCH=x86 CROSS_COMPILE=x86_64-linux-gnu- $JOBS "$@"
+        ;;
+    make)
+        ensure_image "$RT" "$REPO_DIR"
+        JOBS="${CPUS:+-j$CPUS}"
+        run_container "$RT" "$MOUNT_SRC" make $JOBS "$@"
+        ;;
+    *)
+        ensure_image "$RT" "$REPO_DIR"
+        run_container "$RT" "$MOUNT_SRC" "$CMD" "$@"
+        ;;
+esac
