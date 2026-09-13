@@ -12,7 +12,31 @@ all inside a Podman/Docker container — no Linux VM setup required.
 
 ```bash
 brew install podman
-podman machine init
+podman machine init --cpus $(sysctl -n hw.ncpu) --memory 4096
+podman machine start
+```
+
+### Kernel source on an external volume
+
+Podman's VM only mounts `/Users` by default. If your kernel source lives on
+an external volume (e.g. `/Volumes/KernelDev/linux`), add it when creating
+the machine:
+
+```bash
+podman machine init \
+    --volume /Volumes/KernelDev:/Volumes/KernelDev \
+    --cpus $(sysctl -n hw.ncpu) --memory 4096
+podman machine start
+```
+
+To add a volume to an existing machine, the machine must be recreated:
+
+```bash
+podman machine stop
+podman machine rm
+podman machine init \
+    --volume /Volumes/KernelDev:/Volumes/KernelDev \
+    --cpus $(sysctl -n hw.ncpu) --memory 4096
 podman machine start
 ```
 

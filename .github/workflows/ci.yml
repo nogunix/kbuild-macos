@@ -48,8 +48,8 @@ jobs:
 
       - name: Clone kernel source (shallow)
         run: |
-          git clone --depth=1 --branch v6.15 \
-            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+          git clone --depth=1 --branch v7.2 \
+            https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
             "$HOME/linux"
 
       # arm64 native build (Apple Silicon runner)
